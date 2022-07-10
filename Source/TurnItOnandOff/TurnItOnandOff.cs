@@ -10,35 +10,77 @@ using System.Linq;
 using System.Text;
 
 using System.Reflection;
+using System.Threading;
 
 
 namespace TurnItOnandOff
 {
-    // Track the power users
-    [HarmonyPatch(typeof(Building_WorkTable), "UsedThisTick", new Type[] { })]
+
+	public class MapDatabase
+	{
+		public int visibleBuildingCount = 0;
+		public HashSet<Building> reservableBuildings = new HashSet<Building>();
+		public HashSet<Building> HiTechResearchBenches = new HashSet<Building>();
+		public HashSet<Building_Bed> MedicalBeds = new HashSet<Building_Bed>();
+		public HashSet<Building_Door> Autodoors = new HashSet<Building_Door>();
+		public HashSet<Building> loudSpeakers = new HashSet<Building>();
+		public HashSet<Building> lightBalls = new HashSet<Building>();
+
+
+
+		public HashSet<Building> buildingsToModify = new HashSet<Building>();
+
+		public void clear()
+		{
+			reservableBuildings.Clear();
+			HiTechResearchBenches.Clear();
+			MedicalBeds.Clear();
+			Autodoors.Clear();
+			buildingsToModify.Clear();
+		}
+	}
+
+	// Track the tables
+	[HarmonyPatch(typeof(Building_WorkTable), "UsedThisTick", new Type[] { })]
     public static class Building_WorkTable_UsedThisTick_Patch
     {
         [HarmonyPrefix]
         public static void UsedThisTick(Building_WorkTable __instance)
         {
-            // The Hook for tracking things used:            
-            TurnItOnandOff.AddBuildingUsed(__instance);
+            TurnItOnandOff.singleton.useBuilding(__instance);
         }
     }
 
-    [HarmonyPatch(typeof(JobDriver_WatchBuilding), "WatchTickAction", new Type[] { })]
+
+	
+	// Track the watchbuilding jobs
+	[HarmonyPatch(typeof(JobDriver_WatchBuilding), "WatchTickAction", new Type[] { })]
     public static class JobDriver_WatchBuilding_WatchTickAction_Patch
     {
         [HarmonyPrefix]
         public static void WatchTickAction(JobDriver_WatchBuilding __instance)
         {
-            // The Hook for tracking things used:
-            TurnItOnandOff.AddBuildingUsed(__instance.job.targetA.Thing as Building);
-        }
-    }
+			Log.Message("WatchTickAction :" + __instance.ToString());
+
+			
+			if (TurnItOnandOff.singleton.rimthread_comp)
+            {
+                TurnItOnandOff.singleton.rimthread_mut.WaitOne();
+                TurnItOnandOff.singleton.useBuilding(__instance.job.targetA.Thing as Building);
+                TurnItOnandOff.singleton.rimthread_mut.ReleaseMutex();
+                return;
+            }
+            TurnItOnandOff.singleton.useBuilding(__instance.job.targetA.Thing as Building);
+		}
+	}
+    
 
     public class TurnItOnandOff : ModBase
     {
+        public static TurnItOnandOff singleton;
+
+        public bool rimthread_comp = false;
+        public Mutex rimthread_mut;
         public override string ModIdentifier
         {
             get
@@ -47,131 +89,24 @@ namespace TurnItOnandOff
             }
         }
 
-        // Track the number of buildings on the map
-        // When this changes, rescan now instead of delayed
-        // (This seems to be the best way of figuring out when a new building is placed)
-        // For simplicity, cheese it and only care about the visible map
-        int lastVisibleBuildings = 0;
-
-        int ticksToRescan = 0; // Tick tracker for rescanning
-        public override void Tick(int currentTick)
+        public override void Initialize()
         {
-            if (inUseTick != currentTick)
+            Logger.Message("Initialized");
+			singleton = this;
+			if (ModLister.GetActiveModWithIdentifier("majorhoff.rimthreaded") != null)
             {
-                inUseTick = currentTick;
-                                
-                buildingsThatWereUsedLastTick.Clear();
-                
-                buildingsThatWereUsedLastTick.UnionWith(buildingsInUseThisTick);                
-
-                buildingsInUseThisTick.Clear();
-            }
-
-            EvalVitalMon();            
-            EvalResearchTablesandAnalyzers();
-            EvalExternalReservable();
-      
-
-            foreach (Thing thing in buildingsToModifyPowerOn)
-            {
-          //      Verse.Log.Message("tick10");
-                if (thing == null)
-                {
-                    Logger.Message("Tried to modify power level for thing which no longer exists");
-                    continue;
-                }
-         //       Verse.Log.Message("tick11");
-                var powerComp = thing.TryGetComp<CompPowerTrader>();
-         //       Verse.Log.Message("tick12");
-
-                if (powerComp != null)
-                {
-         //           Verse.Log.Message("tick13");
-                    // Set the power requirement 
-                    powerComp.PowerOutput = powerLevels[thing.def.defName][0];
-         //           Verse.Log.Message("tick14");
-                }
-            }
-
-            var visibleBuildings = Find.AnyPlayerHomeMap.listerBuildings.allBuildingsColonist.Count;
-       //     Verse.Log.Message("tick15");
-            if (visibleBuildings != lastVisibleBuildings)
-            {
-       //         Verse.Log.Message("tick16");
-                lastVisibleBuildings = visibleBuildings;
-                ticksToRescan = 0; // Rescan now
-            }
-            --ticksToRescan;
-            if (ticksToRescan < 0)
-            {
-     //           Verse.Log.Message("tick19");
-                ticksToRescan = 2000;
-                // Destructively modifies the things to modify power on, do the state resetting first
-     //           Verse.Log.Message("tick20");
-                ScanForThings();
-            }
-     //       Verse.Log.Message("tick21");
-            foreach (Building building in buildingsThatWereUsedLastTick)
-            {
-   //             Verse.Log.Message("tick2_2");
-                // Skip modifying power on things we're not supposed to modify power on
-                if (!buildingsToModifyPowerOn.Contains(building)) { continue; }     
-                var powerComp = building.TryGetComp<CompPowerTrader>();    //            
-                if (powerComp != null)
-                {
-    //                Verse.Log.Message("tick2_5");
-                    // Set the power requirement to high if the building is in use
-                    powerComp.PowerOutput = powerLevels[building.def.defName][1];
-      //              Verse.Log.Message("tick2_6");
-                }
+                rimthread_comp = true;
+                rimthread_mut = new Mutex();
+                Logger.Message("majorhoff.rimthreaded compability mode");
             }
         }
-
-        public static TurnItOnandOff instance;
-        public static void Log(string log)
+        public override void SettingsChanged()
         {
-            if (instance == null) return;
-            instance.Logger.Message(log);
+            initPowerValues();
         }
 
-        private HugsLib.Settings.SettingHandle<float> multiplier;
-        private HugsLib.Settings.SettingHandle<int> minvalue;
-        HashSet<String> whitelist = new HashSet<String>();
 
-
-        private void initPowerValues()
-        {
-            powerLevels.Clear();
-
-            foreach (var def in DefDatabase<ThingDef>.AllDefsListForReading)
-            {
-                // check if this uses power.
-                // first, get the power properties.
-
-                var powerProps = def.GetCompProperties<CompProperties_Power>();
-                if (powerProps != null && typeof(CompPowerTrader).IsAssignableFrom(powerProps.compClass))
-                {
-                    //this thing uses power. 
-                    //Verse.Log.Message(def.defName);
-
-                    if (powerLevels.ContainsKey(def.defName))
-                    {
-                        Verse.Log.Message("already contains def?");
-                    }
-
-                    if (whitelist.Contains(def.defName) || typeof(Building_WorkTable).IsAssignableFrom(def.thingClass))
-                    {
-                        RegisterDefThatUsesPower(def.defName,
-                            -1 * minvalue,
-                            powerProps.basePowerConsumption * multiplier * -1);
-                    }
-
-                }
-
-            }
-
-        }
-
+        // INITIALIZE
         public override void DefsLoaded()
         {
 
@@ -185,7 +120,7 @@ namespace TurnItOnandOff
             "Idle power usage value",
             "Idle power usage value",
             1);
-                    
+
 
             whitelist.Add("DeepDrill");
             whitelist.Add("ElectricCrematorium");
@@ -204,89 +139,195 @@ namespace TurnItOnandOff
             whitelist.Add("TubeTelevision");
             whitelist.Add("GroundPenetratingScanner");
             whitelist.Add("LongRangeMineralScanner");
-            
-            
-            buildingDefsReservable.Add(ThingDef.Named("LongRangeMineralScanner"));
-            buildingDefsReservable.Add(ThingDef.Named("GroundPenetratingScanner"));
-            buildingDefsReservable.Add(ThingDef.Named("DeepDrill"));
+			whitelist.Add("Loudspeaker");
+			whitelist.Add("LightBall");
 
-            medicalBedDef = ThingDef.Named("HospitalBed");
+
+			reservableDefs.Add(ThingDef.Named("LongRangeMineralScanner"));
+			reservableDefs.Add(ThingDef.Named("GroundPenetratingScanner"));
+			reservableDefs.Add(ThingDef.Named("DeepDrill"));
+
+			LoudSpeakerDef = DefDatabase<ThingDef>.GetNamed("Loudspeaker", false);
+			LoudSpeakerDef = LoudSpeakerDef == default(ThingDef) ? null : LoudSpeakerDef;
+			LightBallDef = LoudSpeakerDef == null ? null : ThingDef.Named("LightBall");
+
+			medicalBedDef = ThingDef.Named("HospitalBed");
             HiTechResearchBenchDef = ThingDef.Named("HiTechResearchBench");
             AutodoorDef = ThingDef.Named("Autodoor");
-            DeepDrillDef = ThingDef.Named("DeepDrill");
 
             initPowerValues();
         }
 
-
-        public override void SettingsChanged()
+        private void initPowerValues()
         {
-            initPowerValues();
-        }
+            powerLevels.Clear();
 
-        public override void Initialize()
-        {            
-            instance = this;
-            Logger.Message("Registered instance");
-        }
-
-        // Power levels pairs as Vector2's, X = Idling, Y = In Use
-        static Dictionary<string, Vector2> powerLevels = new Dictionary<string, Vector2>();
-        static void RegisterDefThatUsesPower(string defName, float idlePower, float activePower)
-        {
-            powerLevels.Add(defName, new Vector2(idlePower, activePower));            
-        }
-
-        
-        #region tracking
-        public static int inUseTick = 0;
-        public static HashSet<Building> buildingsThatWereUsedLastTick = new HashSet<Building>();
-        public static HashSet<Building> buildingsInUseThisTick = new HashSet<Building>();
-        public static HashSet<Building> buildingsToModifyPowerOn = new HashSet<Building>();
-
-        public static HashSet<ThingDef> buildingDefsReservable = new HashSet<ThingDef>();
-        public static HashSet<Building> reservableBuildings = new HashSet<Building>();
-
-        public static HashSet<Building_Bed> MedicalBeds = new HashSet<Building_Bed>();
-        public static HashSet<Building> HiTechResearchBenches = new HashSet<Building>();
-
-        public static HashSet<Building_Door> Autodoors = new HashSet<Building_Door>();
-        public static HashSet<Building> DeepDrills = new HashSet<Building>();
-
-        private static ThingDef medicalBedDef;
-        private static ThingDef HiTechResearchBenchDef;
-        private static ThingDef AutodoorDef;
-        private static ThingDef DeepDrillDef;
-
-        public static void AddBuildingUsed(Building building)
-        {
-            buildingsInUseThisTick.Add(building);
-        }
-        
-        public static void ScanExternalReservable()
-        {
-            reservableBuildings.Clear();
-            foreach (ThingDef def in buildingDefsReservable)
+            foreach (var def in DefDatabase<ThingDef>.AllDefsListForReading)
             {
-                foreach (var map in Find.Maps)
+                // check if this uses power.
+                // first, get the power properties.
+
+                var powerProps = def.GetCompProperties<CompProperties_Power>();
+                if (powerProps != null && typeof(CompPowerTrader).IsAssignableFrom(powerProps.compClass))
                 {
-                    if (map == null) continue;
-                    var buildings = map.listerBuildings.AllBuildingsColonistOfDef(def);
-                    foreach (var building in buildings)
+                    //this thing uses power. 
+
+
+                    if (whitelist.Contains(def.defName) || typeof(Building_WorkTable).IsAssignableFrom(def.thingClass))
                     {
-                        if (building == null) continue;
-                        reservableBuildings.Add(building);
+                        Verse.Log.Message("PowerUser:" + def.defName);
+
+                        RegisterDefThatUsesPower(def.defName,
+                            -1 * minvalue,
+                            powerProps.basePowerConsumption * multiplier * -1);
                     }
+                    else
+                    {
+                        Verse.Log.Message("Excluded PowerUser:" + def.defName);
+                    }
+
                 }
+
             }
+
         }
 
-        public static void EvalExternalReservable()
-        {
-            foreach (var building in reservableBuildings)
-            {                
-                if (building?.Map == null) continue;
+		void RegisterDefThatUsesPower(string defName, float idlePower, float activePower)
+		{
+			powerLevels.Add(defName, new Vector2(idlePower, activePower));
+		}
 
+
+		// DATA
+
+		HashSet<String> whitelist = new HashSet<String>();
+
+        private HugsLib.Settings.SettingHandle<float> multiplier;
+        private HugsLib.Settings.SettingHandle<int> minvalue;
+
+
+		public HashSet<ThingDef> reservableDefs = new HashSet<ThingDef>();
+		private ThingDef medicalBedDef;
+		private ThingDef HiTechResearchBenchDef;
+		private ThingDef AutodoorDef;
+		private ThingDef LoudSpeakerDef;
+		private ThingDef LightBallDef;
+
+
+		public List<MapDatabase> mapDatabase = new List<MapDatabase>();
+		Dictionary<string, Vector2> powerLevels = new Dictionary<string, Vector2>();
+
+
+		public HashSet<Building> buildingsInUseThisTick = new HashSet<Building>();
+		public HashSet<Building> buildingsThatWereUsedLastTick = new HashSet<Building>();
+
+
+		int ticksToRescan = 0;
+
+		//LOGIC
+
+		public void useBuilding(Building building)
+		{
+			buildingsInUseThisTick.Add(building);
+		}
+
+		public override void Tick(int currentTick)
+        {
+
+            if (rimthread_comp)
+            {
+                rimthread_mut.WaitOne();
+				buildingsThatWereUsedLastTick = new HashSet<Building>(buildingsInUseThisTick);
+				buildingsInUseThisTick.Clear();
+                rimthread_mut.ReleaseMutex();
+            }
+            else
+            {
+                buildingsThatWereUsedLastTick = new HashSet<Building>(buildingsInUseThisTick);
+                buildingsInUseThisTick.Clear();
+            }
+
+			
+
+			//// SCANNING BUILDINGS LOGIC
+
+			// CHECK IF NUMBER OF MAPS CORRECT, IF NOT RECREATE NUMBERBUILDINGS LIST
+			if (mapDatabase.Count != Find.Maps.Count)
+			{
+				mapDatabase = new List<MapDatabase>(Find.Maps.Count);
+				for (int i = 0; i < Find.Maps.Count; i++)
+				{
+					mapDatabase.Add(new MapDatabase());
+				}
+			}
+
+			//CHECK IF VISIBLE BUILDINGS NUMBER IS SAME, IF NOT RESCAN
+			for (int i = 0; i < Find.Maps.Count; i++)
+			{
+				Map map = Find.Maps[i];
+
+				if (mapDatabase[i].visibleBuildingCount != map.listerBuildings.allBuildingsColonist.Count)
+				{
+					mapDatabase[i].visibleBuildingCount = map.listerBuildings.allBuildingsColonist.Count;
+					ticksToRescan = 2000;
+					ScanForThings(map, mapDatabase[i]);
+				}
+			}
+
+			//CHECK IF THE RESCAN TICKS ARE DONE 
+			if (ticksToRescan <= 0)
+			{
+				ticksToRescan = 2000;
+				for (int i = 0; i < Find.Maps.Count; i++)
+				{
+					Map map = Find.Maps[i];
+					ScanForThings(map, mapDatabase[i]);
+				}
+			}
+			--ticksToRescan;
+
+
+
+			//// MODIFY POWER LOGIC
+			
+			foreach(MapDatabase data in mapDatabase)
+			{
+				EvalVitalMon(data);
+				EvalResearchTablesandAnalyzers(data);
+				EvalExternalReservable(data);
+				EvalSpeakers(data);
+				EvalLightBall(data);
+				foreach (Building thing in data.buildingsToModify)
+				{
+					if (thing == null)
+					{
+						Logger.Message("Tried to modify power level for thing which no longer exists");
+						continue;
+					}
+					var powerComp = thing.TryGetComp<CompPowerTrader>();
+					if (powerComp != null)
+					{
+
+						// Set the power requirement 
+						if (buildingsThatWereUsedLastTick.Contains(thing))
+						{
+							powerComp.PowerOutput = powerLevels[thing.def.defName][1];
+						}
+						else
+						{
+							powerComp.PowerOutput = powerLevels[thing.def.defName][0];
+						}
+					}
+				}
+
+			}
+		}
+		
+		
+        public void EvalExternalReservable(MapDatabase data)
+        {
+            foreach (var building in data.reservableBuildings)
+            {       
                 if (building.Map.reservationManager.IsReservedByAnyoneOf(building, building.Faction))
                 {
                     buildingsInUseThisTick.Add(building);
@@ -295,12 +336,10 @@ namespace TurnItOnandOff
         }
 
         // Evaluate medical beds for medical beds in use, to register that the vitals monitors should be in high power mode
-        public static void EvalVitalMon()
+        public void EvalVitalMon(MapDatabase data)
         {
-            foreach (var mediBed in MedicalBeds)
+            foreach (var mediBed in data.MedicalBeds)
             {
-                if (mediBed?.Map == null) continue;
-
                 bool occupied = false;
                 foreach (var occupant in mediBed.CurOccupants)
                 {
@@ -318,12 +357,10 @@ namespace TurnItOnandOff
                 
         // How to tell if a research table is in use?
         // I can't figure it out. Instead let's base it on being reserved for use
-        public static void EvalResearchTablesandAnalyzers()
+        public void EvalResearchTablesandAnalyzers(MapDatabase data)
         {
-            foreach (var researchTable in HiTechResearchBenches)
+            foreach (var researchTable in data.HiTechResearchBenches)
             {
-                if (researchTable?.Map == null) continue;
-
                 // Determine if we are reserved:
                 var inUse = researchTable.Map.reservationManager.IsReservedByAnyoneOf(researchTable, researchTable.Faction);
 
@@ -337,77 +374,122 @@ namespace TurnItOnandOff
                 }
             }
         }
-
-        public static void EvalAutodoors()
+        public void EvalAutodoors(MapDatabase data)
         {
-            foreach (var autodoor in Autodoors)
+            foreach (var autodoor in data.Autodoors)
             {
-                if (autodoor == null) continue;
-                if (autodoor.Map == null) continue;
-
                 // If the door allows passage and isn't blocked by an object
                 var inUse = autodoor.Open && (!autodoor.BlockedOpenMomentary);
                 if (inUse) buildingsInUseThisTick.Add(autodoor);
             }
         }
 
-        public static HashSet<ThingDef> thingDefsToLookFor;
-        public static void ScanForThings()
+		public void EvalSpeakers(MapDatabase data)
+		{
+			foreach (var speaker in data.loudSpeakers)
+			{
+				var speakerComp = speaker.TryGetComp<CompLoudspeaker>();
+				// If the door allows passage and isn't blocked by an object
+				if(speakerComp != default(CompLoudspeaker))
+				{
+					if (speakerComp.Active) buildingsInUseThisTick.Add(speaker);
+				}
+				else
+				{
+					Logger.Warning("LoudSpeaker comp error");
+				}
+			}
+		}
+		public void EvalLightBall(MapDatabase data)
+		{
+			foreach (var light in data.lightBalls)
+			{
+				var lightComp = light.TryGetComp<CompLightball>();
+				// If the door allows passage and isn't blocked by an object
+				if (lightComp != default(CompLightball))
+				{
+					if (lightComp.parent.IsRitualTarget()) buildingsInUseThisTick.Add(light);
+				}
+				else
+				{
+					Logger.Warning("LightBall comp error");
+				}
+			}
+
+		}
+
+		//SCANNING LOGIC
+        public HashSet<ThingDef> thingDefsToLookFor;
+        public void ScanForThings(Map map, MapDatabase data)
         {            
             // Build the set of def names to look for if we don't have it
             if (thingDefsToLookFor == null)
             {
-                thingDefsToLookFor = new HashSet<ThingDef>();
-                var defNames = powerLevels.Keys;
+				var defNames = powerLevels.Keys;
+				thingDefsToLookFor = new HashSet<ThingDef>(defNames.Count);
                 foreach (var defName in defNames)
                 {
                     thingDefsToLookFor.Add(ThingDef.Named(defName));
                 }
             }
-            
-            ScanExternalReservable(); // Handle the scanning of external reservable objects
 
-            buildingsToModifyPowerOn.Clear();
-            MedicalBeds.Clear();
-            HiTechResearchBenches.Clear();
-          //  Autodoors.Clear();
-           // DeepDrills.Clear();
-            
-            var maps = Find.Maps;
-            foreach (Map map in maps)
-            {
-                foreach (ThingDef def in thingDefsToLookFor)
-                {                    
-                    var matchingThings = map.listerBuildings.AllBuildingsColonistOfDef(def);
-                    // Merge in all matching things
-                    buildingsToModifyPowerOn.UnionWith(matchingThings);                    
-                }
-                                
-                // Register the medical beds in the watch list
-                var mediBeds = map.listerBuildings.AllBuildingsColonistOfDef(medicalBedDef);
-                foreach (var mediBed in mediBeds)
-                {
-                    var medicalBed = mediBed as Building_Bed;
-                    MedicalBeds.Add(medicalBed);
-                }
+			data.clear();
+			ScanExternalReservable(map, data); // Handle the scanning of external reservable objects
 
-                // Register Hightech research tables too
-                var researchTables = map.listerBuildings.AllBuildingsColonistOfDef(HiTechResearchBenchDef);
-                HiTechResearchBenches.UnionWith(researchTables);
-
-                /*
-                var doors = map.listerBuildings.AllBuildingsColonistOfDef(AutodoorDef);
-                foreach (var door in doors)
-                {
-                    var autodoor = door as Building_Door;
-                    Autodoors.Add(autodoor);
-                }
-
-                var deepDrills = map.listerBuildings.AllBuildingsColonistOfDef(DeepDrillDef);
-                DeepDrills.UnionWith(deepDrills);
-                */
+			foreach (ThingDef def in thingDefsToLookFor)
+            {                    
+                var matchingThings = map.listerBuildings.AllBuildingsColonistOfDef(def);
+				// Merge in all matching things
+				data.buildingsToModify.UnionWith(matchingThings);                    
             }
-        }
-        #endregion
-    }
+                                
+            // Register the medical beds in the watch list
+            var mediBeds = map.listerBuildings.AllBuildingsColonistOfDef(medicalBedDef);
+            foreach (var mediBed in mediBeds)
+            {
+                var medicalBed = mediBed as Building_Bed;
+				data.MedicalBeds.Add(medicalBed);
+            }
+
+            // Register Hightech research tables too
+            var researchTables = map.listerBuildings.AllBuildingsColonistOfDef(HiTechResearchBenchDef);
+			data.HiTechResearchBenches.UnionWith(researchTables);
+
+			if(LoudSpeakerDef != null)
+			{
+				var loudspeakers = map.listerBuildings.AllBuildingsColonistOfDef(LoudSpeakerDef);
+				data.loudSpeakers.UnionWith(loudspeakers);
+			}
+			if (LightBallDef != null)
+			{
+				var lightballs = map.listerBuildings.AllBuildingsColonistOfDef(LightBallDef);
+				data.lightBalls.UnionWith(lightballs);
+			}
+
+			/*
+            var doors = map.listerBuildings.AllBuildingsColonistOfDef(AutodoorDef);
+            foreach (var door in doors)
+            {
+                var autodoor = door as Building_Door;
+                Autodoors.Add(autodoor);
+            }
+            */
+
+
+		}
+
+		public void ScanExternalReservable(Map map, MapDatabase data)
+		{
+			foreach (ThingDef def in reservableDefs)
+			{
+				var buildings = map.listerBuildings.AllBuildingsColonistOfDef(def);
+				foreach (var building in buildings)
+				{
+					data.reservableBuildings.Add(building);
+				}
+
+			}
+		}
+
+	}
 }
