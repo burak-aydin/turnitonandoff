@@ -60,16 +60,7 @@ namespace TurnItOnandOff
         [HarmonyPrefix]
         public static void WatchTickAction(JobDriver_WatchBuilding __instance)
         {
-			Log.Message("WatchTickAction :" + __instance.ToString());
-
-			
-			if (TurnItOnandOff.singleton.rimthread_comp)
-            {
-                TurnItOnandOff.singleton.rimthread_mut.WaitOne();
-                TurnItOnandOff.singleton.useBuilding(__instance.job.targetA.Thing as Building);
-                TurnItOnandOff.singleton.rimthread_mut.ReleaseMutex();
-                return;
-            }
+			//Log.Message("WatchTickAction :" + __instance.ToString());
             TurnItOnandOff.singleton.useBuilding(__instance.job.targetA.Thing as Building);
 		}
 	}
