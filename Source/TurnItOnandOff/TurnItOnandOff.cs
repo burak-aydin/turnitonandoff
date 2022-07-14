@@ -26,7 +26,7 @@ namespace TurnItOnandOff
 		public HashSet<Building> loudSpeakers = new HashSet<Building>();
 		public HashSet<Building> lightBalls = new HashSet<Building>();
 
-
+		public int ticksToRescan = 0;
 
 		public HashSet<Building> buildingsToModify = new HashSet<Building>();
 
@@ -37,6 +37,7 @@ namespace TurnItOnandOff
 			MedicalBeds.Clear();
 			Autodoors.Clear();
 			buildingsToModify.Clear();
+			ticksToRescan = 0;
 		}
 	}
 
@@ -188,6 +189,14 @@ namespace TurnItOnandOff
 			powerLevels.Add(defName, new Vector2(idlePower, activePower));
 		}
 
+		//THIS WILL RESET THE STATE OF THE MOD EVERYTIME A MAP LOADS.
+		//NOT A PERFECT SOLUTION BUT SHOULD WORK GOOD ENOUGH
+		public override void MapLoaded(Verse.Map map)
+		{
+			mapDatabase.Clear();
+			buildingsInUseThisTick.Clear();
+			buildingsThatWereUsedLastTick.Clear();
+		}
 
 		// DATA
 
@@ -213,7 +222,7 @@ namespace TurnItOnandOff
 		public HashSet<Building> buildingsThatWereUsedLastTick = new HashSet<Building>();
 
 
-		int ticksToRescan = 0;
+		
 
 		//LOGIC
 
@@ -260,24 +269,20 @@ namespace TurnItOnandOff
 				if (mapDatabase[i].visibleBuildingCount != map.listerBuildings.allBuildingsColonist.Count)
 				{
 					mapDatabase[i].visibleBuildingCount = map.listerBuildings.allBuildingsColonist.Count;
-					ticksToRescan = 2000;
+					//Logger.Message("visiblecount rescan:" + i);
 					ScanForThings(map, mapDatabase[i]);
+					mapDatabase[i].ticksToRescan = 2000;
 				}
-			}
 
-			//CHECK IF THE RESCAN TICKS ARE DONE 
-			if (ticksToRescan <= 0)
-			{
-				ticksToRescan = 2000;
-				for (int i = 0; i < Find.Maps.Count; i++)
+				if (mapDatabase[i].ticksToRescan <= 0)
 				{
-					Map map = Find.Maps[i];
+					mapDatabase[i].ticksToRescan = 2000;
+					//Logger.Message("ticks rescan:" + i);
 					ScanForThings(map, mapDatabase[i]);
 				}
+				mapDatabase[i].ticksToRescan--;
 			}
-			--ticksToRescan;
-
-
+						
 
 			//// MODIFY POWER LOGIC
 			
@@ -332,9 +337,14 @@ namespace TurnItOnandOff
             foreach (var mediBed in data.MedicalBeds)
             {
                 bool occupied = false;
+
                 foreach (var occupant in mediBed.CurOccupants)
                 {
-                    occupied = true;
+					if(occupant != null && occupant != default(Pawn))
+					{
+						occupied = true;
+						break;
+					}                    
                 }
 
                 if (!occupied) continue;
