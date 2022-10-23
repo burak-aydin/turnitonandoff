@@ -1,6 +1,6 @@
 # turnitonandoff
 
-A rimworld mod by me
+A rimworld mod by hooap
 
 https://steamcommunity.com/sharedfiles/filedetails/?id=2007163386
 

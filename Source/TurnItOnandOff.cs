@@ -167,15 +167,15 @@ namespace TurnItOnandOff
 
                     if (whitelist.Contains(def.defName) || typeof(Building_WorkTable).IsAssignableFrom(def.thingClass))
                     {
-                        Verse.Log.Message("PowerUser:" + def.defName);
+                        Log.Message("PowerUser:" + def.defName);
 
                         RegisterDefThatUsesPower(def.defName,
                             -1 * minvalue,
-                            powerProps.basePowerConsumption * multiplier * -1);
+                            powerProps.PowerConsumption * multiplier * -1);
                     }
                     else
                     {
-                        Verse.Log.Message("Excluded PowerUser:" + def.defName);
+                        Log.Message("Excluded PowerUser:" + def.defName);
                     }
 
                 }
